@@ -8,6 +8,12 @@ on:
 permissions:
   contents: write
 
+# Windows runner 的 stdout 默认是 cp1252，脚本里任何中文 print 都会抛
+# UnicodeEncodeError。v1.0.0 / v1.0.1 的构建全挂在这里。
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
 jobs:
   test:
     runs-on: windows-latest
@@ -32,10 +38,11 @@ jobs:
         run: python tests/mock_api_test.py
 
       # ---- 尽力而为的部分 ----
-      # windows-latest 是 headless 环境，Qt 平台插件有概率直接 abort（进程级退出，
-      # 连 traceback 都没有）。这跟产品本身无关，所以不让它挡住发布，
-      # 但仍然会跑、失败仍然会在 Actions 里标红。
-      - name: GUI smoke test (offscreen, best effort)
+      # v1.0.0 / v1.0.1 的构建挂在这里，真因是 stdout 编码（cp1252）导致中文 print 抛异常，
+      # 上面已经用 PYTHONIOENCODING 修掉。既然根因不是 Qt，这步本该能过；
+      # 但为了让 Release 不被 headless 环境的偶发问题挡住，先保留 best-effort，
+      # 等连续几次都绿了再把 continue-on-error 去掉。
+      - name: GUI smoke test (offscreen)
         continue-on-error: true
         env:
           QT_QPA_PLATFORM: offscreen
@@ -47,6 +54,8 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
+          Write-Host "stdout encoding check:"
+          python -u -c "import sys; print(sys.stdout.encoding, sys.flags.utf8_mode)"
           Write-Host "QT_QPA_PLATFORM=$env:QT_QPA_PLATFORM"
           Write-Host "QT_PLUGIN_PATH=$env:QT_PLUGIN_PATH"
           Write-Host "QTDIR=$env:QTDIR"

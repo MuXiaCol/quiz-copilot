@@ -13,6 +13,13 @@ from pathlib import Path
 
 import numpy as np
 
+# 防止 cp1252 stdout 把中文输出变成 UnicodeEncodeError（CI 上会直接挂）
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.cache import AnswerCache  # noqa: E402

@@ -11,6 +11,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+# CI 的 Windows runner 上 stdout 是 cp1252，打印中文会抛 UnicodeEncodeError。
+# 这个坑让 v1.0.0 / v1.0.1 的构建全挂在这一步，所以每个测试脚本开头都强制 UTF-8。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.cache import AnswerCache, text_key  # noqa: E402
