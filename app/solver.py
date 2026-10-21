@@ -193,6 +193,31 @@ def _client(cfg):
     )
 
 
+THINKING_LEVELS = ("off", "low", "high", "max")
+
+
+def thinking_kwargs(cfg) -> dict[str, Any]:
+    """把 api.thinking 翻译成请求参数。
+
+    DeepSeek 的 deepseek-flash 默认就是「思考开启 + effort=high」，
+    不显式传的话等于一直在用最高档，又慢又贵。
+    思考模式下 temperature / presence_penalty / frequency_penalty 会被忽略。
+    """
+    level = str(cfg.get("api.thinking", "low") or "low").strip().lower()
+    if level not in THINKING_LEVELS:
+        level = "low"
+    if level == "off":
+        return {"extra_body": {"thinking": {"type": "disabled"}}}
+    return {
+        "reasoning_effort": level,
+        "extra_body": {"thinking": {"type": "enabled"}},
+    }
+
+
+# 兼容端点不认这些参数时会报错，报错信息里通常带其中之一
+_EXTRA_KEYS = ("reasoning_effort", "extra_body", "thinking")
+
+
 def _chat(cfg, messages, want_json: bool = True) -> str:
     client = _client(cfg)
     kwargs: dict[str, Any] = {
@@ -201,14 +226,24 @@ def _chat(cfg, messages, want_json: bool = True) -> str:
         "temperature": float(cfg.get("api.temperature", 0)),
         "max_tokens": int(cfg.get("api.max_tokens", 2000)),
     }
+    kwargs.update(thinking_kwargs(cfg))
     if want_json:
         kwargs["response_format"] = {"type": "json_object"}
     try:
         resp = client.chat.completions.create(**kwargs)
-    except Exception as e:  # 某些兼容端点不认 json_object
-        if not want_json or "response_format" not in str(e).lower():
+    except Exception as e:
+        # 某些 OpenAI 兼容端点不认 json_object，也可能不认思考参数，各降级一次
+        err = str(e).lower()
+        dropped = False
+        if want_json and "response_format" in err:
+            kwargs.pop("response_format", None)
+            dropped = True
+        if any(k in err for k in _EXTRA_KEYS):
+            for k in _EXTRA_KEYS:
+                kwargs.pop(k, None)
+            dropped = True
+        if not dropped:
             raise
-        kwargs.pop("response_format", None)
         resp = client.chat.completions.create(**kwargs)
     return (resp.choices[0].message.content or "").strip()
 

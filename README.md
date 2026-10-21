@@ -123,6 +123,27 @@ pwsh -File .\build.ps1     # 产出 dist\QuizCopilot.exe
 
 ---
 
+## 思考等级
+
+设置里的「思考等级」，或配置里的 `api.thinking`：
+
+| 值 | 行为 | 适合 |
+|---|---|---|
+| `off` | 不产生思维链，直接出答案。**只有这时 `temperature` 才生效** | 纯选择/判断题，追求最快最省 |
+| `low` | **默认**。思维链较短 | 大多数刷题场景 |
+| `high` | 思维链较长 | 概念辨析、"下列**不包括**"这类反向设问多的题 |
+| `max` | 最慢最贵 | 基本用不上 |
+
+> **为什么默认设成 low**：`deepseek-flash` 服务端默认是「思考开启 + `high`」，
+> 什么都不传等于一直在跑最高档。这里显式降下来省钱提速。
+>
+> 注意思考模式下 `temperature` / `presence_penalty` / `frequency_penalty` **会被忽略**
+> （传了不报错，但不生效）。
+
+如果遇到「模型没有返回可解析的 JSON」，多半是思维链把 `max_tokens` 用光了，把 `max_tokens` 调到 `4000` 即可。
+
+---
+
 ## 配置
 
 `%APPDATA%\QuizCopilot\config.json`（设置界面点保存会写这个文件）
@@ -133,7 +154,8 @@ pwsh -File .\build.ps1     # 产出 dist\QuizCopilot.exe
     "base_url": "https://api.deepseek.com/v1",
     "api_key": "sk-...",              // 只存在本机，不进仓库
     "model": "deepseek-flash",        // 必须支持图片输入
-    "temperature": 0,
+    "thinking": "low",                // off / low / high / max
+    "temperature": 0,                 // 思考模式下会被忽略
     "timeout": 90,
     "max_tokens": 2000
   },

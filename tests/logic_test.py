@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.cache import AnswerCache, text_key  # noqa: E402
 from app.config import Config  # noqa: E402
-from app.solver import _build_answers, extract_json  # noqa: E402
+from app.solver import _build_answers, extract_json, thinking_kwargs  # noqa: E402
 
 SAMPLE_JSON = """
 ```json
@@ -105,11 +105,46 @@ def test_cache() -> None:
     print("  sqlite 缓存读写 ✓")
 
 
+def test_thinking_levels() -> None:
+    """api.thinking 必须翻译成正确的请求参数。"""
+    with tempfile.TemporaryDirectory() as td:
+        cfg = Config(Path(td) / "config.json")
+
+        # 默认必须是 low：deepseek-flash 服务端默认是 high，不显式降就一直在跑最高档
+        assert cfg.get("api.thinking") == "low", cfg.get("api.thinking")
+        kw = thinking_kwargs(cfg)
+        assert kw["reasoning_effort"] == "low", kw
+        assert kw["extra_body"] == {"thinking": {"type": "enabled"}}, kw
+
+        for level in ("high", "max"):
+            cfg.set("api.thinking", level)
+            assert thinking_kwargs(cfg)["reasoning_effort"] == level
+
+        # off 走 disabled，不下发 reasoning_effort
+        cfg.set("api.thinking", "off")
+        kw = thinking_kwargs(cfg)
+        assert kw == {"extra_body": {"thinking": {"type": "disabled"}}}, kw
+        assert "reasoning_effort" not in kw
+
+        # 乱填一律回落到 low，不能把非法值发给服务端
+        for bad in ("", "medium", "超", None, 123):
+            cfg.set("api.thinking", bad)
+            assert thinking_kwargs(cfg)["reasoning_effort"] == "low", bad
+
+        # 大小写和空格要能吃
+        cfg.set("api.thinking", "  HIGH ")
+        assert thinking_kwargs(cfg)["reasoning_effort"] == "high"
+        cfg.set("api.thinking", "OFF ")
+        assert thinking_kwargs(cfg) == {"extra_body": {"thinking": {"type": "disabled"}}}
+    print("  思考等级映射 ✓")
+
+
 def main() -> int:
     print("纯逻辑测试（不依赖 Qt）")
     test_json_and_answers()
     test_config_roundtrip()
     test_cache()
+    test_thinking_levels()
     print("全部通过 ✓")
     return 0
 

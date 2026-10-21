@@ -110,6 +110,23 @@ def main() -> int:
     # 请求体检查
     body = CAPTURED[0]
     assert body["model"] == "deepseek-flash", body["model"]
+
+    # 思考等级：默认 low，并且 extra_body 的 thinking 要真的落到请求体顶层
+    assert body.get("reasoning_effort") == "low", body.get("reasoning_effort")
+    assert body.get("thinking") == {"type": "enabled"}, body.get("thinking")
+    print(f"思考参数: reasoning_effort={body.get('reasoning_effort')} thinking={body.get('thinking')}")
+
+    # off 档要变成 disabled 且不下发 reasoning_effort
+    cfg.set("api.thinking", "off")
+    CAPTURED.clear()
+    solver.solve(make_quiz_image(905), cfg, cache, None)
+    off_body = CAPTURED[0]
+    assert "reasoning_effort" not in off_body, off_body.get("reasoning_effort")
+    assert off_body.get("thinking") == {"type": "disabled"}, off_body.get("thinking")
+    print(f"关闭思考: reasoning_effort 未下发, thinking={off_body.get('thinking')}")
+    cfg.set("api.thinking", "low")
+    CAPTURED.clear()
+
     user_content = body["messages"][1]["content"]
     blocks = [b for b in user_content if b.get("type") == "image_url"]
     print(f"图片块数量: {len(blocks)}（900px 高应为 1 张）")

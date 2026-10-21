@@ -28,6 +28,10 @@ DEFAULTS: dict[str, Any] = {
         "base_url": "https://api.deepseek.com/v1",
         "api_key": "",
         "model": "deepseek-flash",
+        # 思考等级：off / low / high / max
+        # deepseek-flash 服务端默认是「思考开启 + effort=high」，这里显式降档省钱提速。
+        # 注意思考模式会忽略 temperature。
+        "thinking": "low",
         "temperature": 0,
         "timeout": 90,
         "max_tokens": 2000,

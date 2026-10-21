@@ -4,6 +4,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -60,6 +61,26 @@ class SettingsDialog(QDialog):
         self.model = QLineEdit(str(cfg.get("api.model", "deepseek-flash")))
         self.model.setPlaceholderText("deepseek-flash（必须支持图片输入）")
         form.addRow("模型", self.model)
+
+        think_row = QHBoxLayout()
+        self.thinking = QComboBox()
+        for text, value, tip in (
+            ("关闭 —— 最快最省，概念题准确率会降", "off", "不产生思维链，temperature 才会生效"),
+            ("低 —— 默认，速度与准确率折中", "low", "思维链较短，适合大多数刷题场景"),
+            ("高 —— 更准更慢", "high", "服务端默认值，思维链较长"),
+            ("最高 —— 最准最慢最贵", "max", "不推荐，这类任务用不上"),
+        ):
+            self.thinking.addItem(text, value)
+            self.thinking.setItemData(self.thinking.count() - 1, tip, Qt.ItemDataRole.ToolTipRole)
+        cur = str(cfg.get("api.thinking", "low") or "low").lower()
+        idx = self.thinking.findData(cur)
+        self.thinking.setCurrentIndex(idx if idx >= 0 else 1)
+        think_row.addWidget(self.thinking, 1)
+        form.addRow("思考等级", think_row)
+        self.thinking.setToolTip(
+            "deepseek-flash 默认是「思考开启 + 高」；这里显式选择避免一直跑最高档。\n"
+            "思考模式会忽略 temperature。"
+        )
 
         test_row = QHBoxLayout()
         self.test_btn = QPushButton("测试连接")
@@ -194,6 +215,7 @@ class SettingsDialog(QDialog):
         cfg.set("api.base_url", self.base_url.text().strip())
         cfg.set("api.api_key", self.api_key.text().strip())
         cfg.set("api.model", self.model.text().strip() or "deepseek-flash")
+        cfg.set("api.thinking", str(self.thinking.currentData() or "low"))
         cfg.set("ui.width", int(self.width_spin.value()))
         cfg.set("ui.opacity", float(self.opacity_spin.value()))
         cfg.set("ui.show_reason", bool(self.show_reason.isChecked()))
