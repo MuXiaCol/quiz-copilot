@@ -12,7 +12,8 @@ Thumbs.db
 .DS_Store
 .idea/
 .vscode/
-tests/overlay_live.png
+# 测试跑出来的截图（验证用，不属于仓库）
+tests/*.png
 
 # 本地配置与密钥，永远不要提交
 config.json
