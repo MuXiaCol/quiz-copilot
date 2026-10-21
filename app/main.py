@@ -50,6 +50,8 @@ class App:
         self.cache = AnswerCache()
         self._picker: RegionPicker | None = None
         self._settings: SettingsDialog | None = None
+        # 用户按 F6 主动藏起来之后，任何后台行为都不得把它弹回来
+        self._user_hidden = False
 
         self.overlay = OverlayWindow(self.cfg)
         self.pipeline = Pipeline(self.cfg, self.cache)
@@ -85,7 +87,8 @@ class App:
         self.pipeline.status.connect(self.overlay.set_status)
         self.pipeline.answers.connect(self._on_answers)
         self.pipeline.failed.connect(self._on_failed)
-        self.watcher.changed.connect(self.do_capture)
+        # 自动模式是"后台行为"，必须显式标记成 auto，否则会把用户藏起来的窗口弹回来
+        self.watcher.changed.connect(lambda: self.do_capture(auto=True))
 
         self.overlay.open_settings.connect(self.open_settings)
         self.overlay.hide_requested.connect(self.overlay.hide)
@@ -100,7 +103,7 @@ class App:
         menu.addAction(act_cap)
 
         act_toggle = QAction("显示 / 隐藏悬浮窗", menu)
-        act_toggle.triggered.connect(self.overlay.toggle_visible)
+        act_toggle.triggered.connect(self.toggle_overlay)
         menu.addAction(act_toggle)
 
         act_pick = QAction("框选识别区域…", menu)
@@ -135,29 +138,56 @@ class App:
 
     def _on_tray_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self.overlay.toggle_visible()
+            self.toggle_overlay()
 
     def _on_hotkey(self, name: str) -> None:
         if name == "capture":
             self.do_capture()
         elif name == "toggle":
-            self.overlay.toggle_visible()
+            self.toggle_overlay()
         elif name == "pick":
             self.open_picker()
         elif name == "settings":
             self.open_settings()
 
     # ------------------------------------------------------------------
-    def do_capture(self) -> None:
-        if not self.overlay.isVisible():
+    def _show_overlay(self) -> None:
+        """只有用户没主动藏起来时才真的弹出来。"""
+        if self._user_hidden:
+            return
+        self.overlay.show_no_activate()
+
+    def _set_hidden(self, hidden: bool) -> None:
+        self._user_hidden = bool(hidden)
+        if hidden:
+            self.overlay.hide()
+            # 藏起来就静默：不弹窗，也不后台偷偷截图烧 API
+            self.watcher.paused = True
+            log("悬浮窗已隐藏，自动模式暂停")
+        else:
             self.overlay.show_no_activate()
+            log("悬浮窗已恢复")
+            if self.cfg.get("behavior.auto_mode", False):
+                self.watcher.paused = False
+                self.watcher.start()
+
+    def toggle_overlay(self) -> None:
+        self._set_hidden(not self._user_hidden)
+
+    def do_capture(self, auto: bool = False) -> None:
         if self._picker is not None:
             return
+        if auto and self._user_hidden:
+            return                       # 后台自动识别不打扰隐藏状态
+        if not auto and self._user_hidden:
+            self._set_hidden(False)      # 手动识别 = 想看到结果
         self.watcher.paused = True
         self.pipeline.run()
 
     def _on_answers(self, answers: list) -> None:
-        self.overlay.show_answers(answers)
+        self.overlay.show_answers(answers)   # 内容总是更新，窗口可以继续藏着
+        if self._user_hidden:
+            return
         self.overlay.show_no_activate()
         self.watcher.paused = False
         if self.cfg.get("behavior.auto_mode", False):
@@ -165,9 +195,11 @@ class App:
 
     def _on_failed(self, message: str) -> None:
         self.overlay.show_error(message)
+        log("pipeline error: " + message)
+        if self._user_hidden:
+            return
         self.overlay.show_no_activate()
         self.watcher.paused = False
-        log("pipeline error: " + message)
 
     # ------------------------------------------------------------------
     def open_picker(self) -> None:
@@ -199,17 +231,17 @@ class App:
             self.watcher.paused = True      # 设置窗口还开着，先别自动抓
             self._restore_settings()
             return
-        self.overlay.show_no_activate()
+        self._set_hidden(False)             # 刚框完区域，明确要让用户看到
         QTimer.singleShot(120, self.do_capture)
 
     def _on_pick_cancelled(self) -> None:
         self._close_picker()
-        self.watcher.paused = False
+        self.watcher.paused = self._user_hidden
         self.overlay.set_status("已取消框选")
         if self._settings is not None:
             self._restore_settings()
             return
-        self.overlay.show_no_activate()
+        self._show_overlay()
 
     # ------------------------------------------------------------------
     def open_settings(self) -> None:
@@ -247,7 +279,7 @@ class App:
         self.overlay.apply_style()
         self.overlay.set_click_through(bool(self.cfg.get("ui.click_through", False)))
         self.overlay.set_status("就绪")
-        self.overlay.show_no_activate()
+        self._set_hidden(False)             # 明确点开过设置，回来时应该能看到
         self.watcher.paused = False
         if self.cfg.get("behavior.auto_mode", False):
             self.watcher.start()
@@ -257,7 +289,8 @@ class App:
     def _toggle_auto(self, on: bool) -> None:
         self.cfg.set("behavior.auto_mode", bool(on))
         self.cfg.save()
-        if on:
+        if on and not self._user_hidden:
+            self.watcher.paused = False
             self.watcher.start()
         else:
             self.watcher.stop()

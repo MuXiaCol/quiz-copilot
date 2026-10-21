@@ -5,6 +5,8 @@ __pycache__/
 *.pyc
 *.spec
 tests/test_cache.db
+tests/test_*.txt
+*_out.txt
 *.log
 Thumbs.db
 .DS_Store
