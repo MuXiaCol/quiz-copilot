@@ -305,20 +305,3 @@ tests/
 ## 许可
 
 [MIT](LICENSE)。软件按原样提供，不附带任何担保；识别结果仅供参考，使用后果由使用者自行承担。
-
----
-
-## English
-
-**QuizCopilot** — a Windows overlay that reads a screen region, asks a vision model for the answers, and floats them in a **non-activating** window pinned to the bottom-left corner.
-
-Press **F5** to capture, **F7** to pick the region, **F8** for settings. Any OpenAI-compatible vision endpoint works (default: DeepSeek `deepseek-flash`).
-
-It never steals focus (`WS_EX_NOACTIVATE`), never touches the page, and never clicks or submits anything — it only shows you the answers.
-
-```powershell
-pwsh -File .\setup.ps1
-pwsh -File .\start.ps1
-```
-
-Long screenshots are split at blank lines into strips so small text survives the model's downscaling. MIT licensed.
