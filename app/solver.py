@@ -115,6 +115,67 @@ def extract_json(text: str) -> dict | None:
     return None
 
 
+_ANSWERS_ARR_RE = re.compile(r'"answers"\s*:\s*\[')
+
+
+class _PartialAnswers:
+    """增量扫描流式文本，抠出 {"answers":[…]} 数组里已完整闭合的题。
+
+    每凑齐一个 JSON 对象就返回它，调用方可以立刻显示；字符串感知，
+    题干里的引号、转义、大括号都不会干扰配对。
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._found = False
+        self._i = 0
+        self._depth = 0
+        self._in_str = False
+        self._esc = False
+        self._start: int | None = None
+
+    def feed(self, text: str) -> list[dict]:
+        self._buf += text
+        out: list[dict] = []
+        if not self._found:
+            m = _ANSWERS_ARR_RE.search(self._buf)
+            if not m:
+                # 还没出现 answers 数组：只留尾部一小段，缓冲别无限涨
+                self._buf = self._buf[-48:]
+                return out
+            self._found = True
+            self._i = m.end()
+        while self._i < len(self._buf):
+            ch = self._buf[self._i]
+            self._i += 1
+            if self._in_str:
+                if self._esc:
+                    self._esc = False
+                elif ch == "\\":
+                    self._esc = True
+                elif ch == '"':
+                    self._in_str = False
+                continue
+            if ch == '"':
+                self._in_str = True
+            elif ch == "{":
+                if self._depth == 0:
+                    self._start = self._i - 1
+                self._depth += 1
+            elif ch == "}":
+                if self._depth > 0:
+                    self._depth -= 1
+                    if self._depth == 0 and self._start is not None:
+                        try:
+                            out.append(json.loads(self._buf[self._start : self._i]))
+                        except Exception:
+                            pass
+                        self._start = None
+            elif ch == "]" and self._depth == 0:
+                break  # 数组结束，后面不用再看
+        return out
+
+
 _LETTER_RE = re.compile(r"[A-H]")
 _YES = {"对", "正确", "√", "T", "TRUE", "是"}
 _NO = {"错", "错误", "×", "F", "FALSE", "否"}
@@ -135,48 +196,52 @@ def _norm_answer(raw: Any, qtype: str) -> list[str]:
     return letters or ([joined] if joined else [])
 
 
+def _build_one(it: Any, fallback_no: int) -> Answer | None:
+    """把单个答案对象归一化成 Answer；输入不是 dict 时返回 None。"""
+    if not isinstance(it, dict):
+        return None
+    try:
+        no = int(it.get("no", fallback_no))
+    except Exception:
+        no = fallback_no
+    qtype = str(it.get("type") or "单选题").strip()
+    try:
+        conf = float(it.get("confidence", 0.0))
+    except Exception:
+        conf = 0.0
+    letters = _norm_answer(it.get("answer", []), qtype) or ["?"]
+
+    # option_texts 是标准字段；option_text 是旧格式/兜底
+    texts: list[str] = []
+    raw_texts = it.get("option_texts")
+    if isinstance(raw_texts, (list, tuple)):
+        texts = [str(t).strip() for t in raw_texts if str(t).strip()]
+    elif isinstance(raw_texts, str) and raw_texts.strip():
+        texts = _split_option_text(raw_texts, len(letters))
+
+    return Answer(
+        no=no,
+        qtype=qtype,
+        stem=str(it.get("stem") or "").strip(),
+        letters=letters,
+        option_text=str(it.get("option_text") or "").strip(),
+        confidence=max(0.0, min(1.0, conf)),
+        reason=str(it.get("reason") or "").strip(),
+        option_texts=texts,
+    )
+
+
 def _build_answers(payload: dict) -> list[Answer]:
     items = payload.get("answers")
     if isinstance(items, dict):
         items = [items]
     if not isinstance(items, list):
         return []
-
     out: list[Answer] = []
     for i, it in enumerate(items):
-        if not isinstance(it, dict):
-            continue
-        try:
-            no = int(it.get("no", i + 1))
-        except Exception:
-            no = i + 1
-        qtype = str(it.get("type") or "单选题").strip()
-        try:
-            conf = float(it.get("confidence", 0.0))
-        except Exception:
-            conf = 0.0
-        letters = _norm_answer(it.get("answer", []), qtype) or ["?"]
-
-        # option_texts 是标准字段；option_text 是旧格式/兜底
-        texts: list[str] = []
-        raw_texts = it.get("option_texts")
-        if isinstance(raw_texts, (list, tuple)):
-            texts = [str(t).strip() for t in raw_texts if str(t).strip()]
-        elif isinstance(raw_texts, str) and raw_texts.strip():
-            texts = _split_option_text(raw_texts, len(letters))
-
-        out.append(
-            Answer(
-                no=no,
-                qtype=qtype,
-                stem=str(it.get("stem") or "").strip(),
-                letters=letters,
-                option_text=str(it.get("option_text") or "").strip(),
-                confidence=max(0.0, min(1.0, conf)),
-                reason=str(it.get("reason") or "").strip(),
-                option_texts=texts,
-            )
-        )
+        a = _build_one(it, i + 1)
+        if a is not None:
+            out.append(a)
     return sorted(out, key=lambda a: a.no)
 
 
@@ -233,7 +298,23 @@ def thinking_kwargs(cfg) -> dict[str, Any]:
 _EXTRA_KEYS = ("reasoning_effort", "extra_body", "thinking")
 
 
-def _chat(cfg, messages, want_json: bool = True) -> str:
+def _create(client, kwargs: dict[str, Any], stream: bool, on_text) -> str:
+    if stream:
+        parts: list[str] = []
+        for ev in client.chat.completions.create(**{**kwargs, "stream": True}):
+            if not getattr(ev, "choices", None):
+                continue
+            piece = getattr(ev.choices[0].delta, "content", None)
+            if piece:
+                parts.append(piece)
+                if on_text is not None:
+                    on_text(piece)
+        return "".join(parts).strip()
+    resp = client.chat.completions.create(**kwargs)
+    return (resp.choices[0].message.content or "").strip()
+
+
+def _chat(cfg, messages, want_json: bool = True, on_text=None) -> str:
     client = _client(cfg)
     kwargs: dict[str, Any] = {
         "model": cfg.get("api.model"),
@@ -244,10 +325,11 @@ def _chat(cfg, messages, want_json: bool = True) -> str:
     kwargs.update(thinking_kwargs(cfg))
     if want_json:
         kwargs["response_format"] = {"type": "json_object"}
+    stream = bool(cfg.get("api.stream", True))
     try:
-        resp = client.chat.completions.create(**kwargs)
+        return _create(client, kwargs, stream, on_text)
     except Exception as e:
-        # 某些 OpenAI 兼容端点不认 json_object，也可能不认思考参数，各降级一次
+        # 某些 OpenAI 兼容端点不认 json_object / 思考参数 / 流式，各降级一次
         err = str(e).lower()
         dropped = False
         if want_json and "response_format" in err:
@@ -257,10 +339,12 @@ def _chat(cfg, messages, want_json: bool = True) -> str:
             for k in _EXTRA_KEYS:
                 kwargs.pop(k, None)
             dropped = True
+        if stream and "stream" in err:
+            stream = False
+            dropped = True
         if not dropped:
             raise
-        resp = client.chat.completions.create(**kwargs)
-    return (resp.choices[0].message.content or "").strip()
+        return _create(client, kwargs, stream, on_text)
 
 
 def _retry_image_blocks(strips: list[bytes], cfg) -> list[dict]:
@@ -337,6 +421,7 @@ def solve(
     cache: AnswerCache | None = None,
     status: StatusFn | None = None,
     hint: str = "",
+    partial: Callable[[list[Answer]], None] | None = None,
 ) -> list[Answer]:
     """核心入口：BGR 截图 → 答案列表。"""
     # 先用原始像素哈希查缓存，命中就完全跳过切带 + PNG 编码（整屏秒级开销）
@@ -382,7 +467,26 @@ def solve(
 
     if status:
         status("AI 识别中…")
-    payload = extract_json(_chat(cfg, messages))
+
+    # 流式回调：每凑齐一道完整的题就先显示（partial 由上层接到悬浮窗）
+    shown: list[Answer] = []
+    parser = _PartialAnswers()
+
+    def _on_text(piece: str) -> None:
+        items = parser.feed(piece)
+        if not items:
+            return
+        grew = False
+        for it in items:
+            a = _build_one(it, len(shown) + 1)
+            if a is not None:
+                shown.append(a)
+                grew = True
+        if grew and partial is not None:
+            partial(list(shown))
+
+    text = _chat(cfg, messages, on_text=_on_text)
+    payload = extract_json(text)
     if payload is None:
         raise RuntimeError("模型没有返回可解析的 JSON，检查模型名是否为支持图片输入的 deepseek-flash")
     answers = _build_answers(payload)

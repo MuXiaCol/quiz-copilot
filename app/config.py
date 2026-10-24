@@ -34,6 +34,8 @@ DEFAULTS: dict[str, Any] = {
         # deepseek-flash 服务端默认是「思考开启 + effort=high」，这里显式降档省钱提速。
         # 注意思考模式会忽略 temperature。
         "thinking": "low",
+        # 流式输出：每凑齐一道完整的题就先显示到悬浮窗，不用等全部生成完
+        "stream": True,
         "temperature": 0,
         "timeout": 90,
         "max_tokens": 2000,

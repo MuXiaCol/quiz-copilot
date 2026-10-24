@@ -82,6 +82,14 @@ class SettingsDialog(QDialog):
             "思考模式会忽略 temperature。"
         )
 
+        self.stream = QCheckBox("流式输出：答案边生成边显示")
+        self.stream.setChecked(bool(cfg.get("api.stream", True)))
+        self.stream.setToolTip(
+            "开启后每凑齐一道完整的题就先显示，第 1 题出结果时其余题可能还在生成。\n"
+            "个别端点不支持流式会自动降级为整段返回。"
+        )
+        form.addRow("", self.stream)
+
         test_row = QHBoxLayout()
         self.test_btn = QPushButton("测试连接")
         self.test_btn.clicked.connect(self._on_test)
@@ -216,6 +224,7 @@ class SettingsDialog(QDialog):
         cfg.set("api.api_key", self.api_key.text().strip())
         cfg.set("api.model", self.model.text().strip() or "deepseek-flash")
         cfg.set("api.thinking", str(self.thinking.currentData() or "low"))
+        cfg.set("api.stream", bool(self.stream.isChecked()))
         cfg.set("ui.width", int(self.width_spin.value()))
         cfg.set("ui.opacity", float(self.opacity_spin.value()))
         cfg.set("ui.show_reason", bool(self.show_reason.isChecked()))

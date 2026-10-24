@@ -14,6 +14,7 @@ class SolveWorker(QThread):
     """在工作线程里跑 截图 + 调模型，绝不阻塞 UI。"""
 
     status = Signal(str)
+    partial = Signal(list)
     done = Signal(list)
     failed = Signal(str)
 
@@ -28,7 +29,9 @@ class SolveWorker(QThread):
         try:
             self.status.emit("截图中…")
             img = screen.grab(self.rect)
-            answers = solver.solve(img, self.cfg, self.cache, self.status.emit)
+            answers = solver.solve(
+                img, self.cfg, self.cache, self.status.emit, partial=self.partial.emit
+            )
             self.done.emit(answers)
         except Exception as e:  # noqa: BLE001
             self.failed.emit(f"{type(e).__name__}: {e}")
@@ -120,6 +123,7 @@ class Pipeline(QObject):
     """UI 与求解之间的调度器，同一时刻只允许一个求解在跑。"""
 
     status = Signal(str)
+    partial = Signal(list)
     answers = Signal(list)
     failed = Signal(str)
 
@@ -147,6 +151,7 @@ class Pipeline(QObject):
         # 线程结束后自我销毁；不在 UI 线程上 wait() 卡等待
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker.status.connect(self.status)
+        self._worker.partial.connect(self.partial)
         self._worker.done.connect(self._on_done)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()

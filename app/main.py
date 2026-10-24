@@ -86,6 +86,7 @@ class App:
     def _wire(self) -> None:
         self.pipeline.status.connect(self.overlay.set_status)
         self.pipeline.answers.connect(self._on_answers)
+        self.pipeline.partial.connect(self._on_partial)
         self.pipeline.failed.connect(self._on_failed)
         # 自动模式是"后台行为"，必须显式标记成 auto，否则会把用户藏起来的窗口弹回来
         self.watcher.changed.connect(lambda: self.do_capture(auto=True))
@@ -183,6 +184,10 @@ class App:
             self._set_hidden(False)      # 手动识别 = 想看到结果
         self.watcher.paused = True
         self.pipeline.run()
+
+    def _on_partial(self, answers: list) -> None:
+        """流式过程中的半成品：只刷新卡片内容，不动 watcher、不弹窗。"""
+        self.overlay.show_answers(answers)
 
     def _on_answers(self, answers: list) -> None:
         self.overlay.show_answers(answers)   # 内容总是更新，窗口可以继续藏着

@@ -158,6 +158,7 @@ pwsh -File .\build.ps1     # 产出 dist\QuizCopilot.exe
     "api_key": "sk-...",              // 只存在本机，不进仓库
     "model": "deepseek-flash",        // 必须支持图片输入
     "thinking": "low",                // off / low / high / max
+    "stream": true,                   // 流式输出：答案边生成边显示
     "temperature": 0,                 // 思考模式下会被忽略
     "timeout": 90,
     "max_tokens": 2000
