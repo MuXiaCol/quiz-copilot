@@ -1,7 +1,9 @@
 """流水线：画面变化检测 + 后台求解线程。"""
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QRunnable, QThread, QThreadPool, QTimer, Signal
+
+import numpy as np
 
 from . import screen, solver
 from .cache import AnswerCache
@@ -32,8 +34,29 @@ class SolveWorker(QThread):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
+class _HashSignals(QObject):
+    hashed = Signal(object)
+
+
+class _HashJob(QRunnable):
+    """线程池里跑"截屏 + 量化网格"。整屏一次上百毫秒，放 UI 线程会周期性卡顿。"""
+
+    def __init__(self, sig: _HashSignals, rect: tuple[int, int, int, int]):
+        super().__init__()
+        self._sig = sig
+        self._rect = rect
+
+    def run(self) -> None:
+        self._sig.hashed.emit(screen.region_sig(self._rect))
+
+
 class ChangeWatcher(QObject):
-    """轮询屏幕，画面稳定下来且与上次不同就发一次信号。"""
+    """轮询屏幕，画面稳定下来且与上次不同就发一次信号。
+
+    截图量化在线程池里算，UI 线程只做比较；同一时刻只有一个任务在飞。
+    稳定性用"差异单元比例 ≤ 容差"判定，光标闪烁、角落倒计时跳动这类
+    微小噪声不会再把画面判成"一直在变"。
+    """
 
     changed = Signal()
 
@@ -42,15 +65,21 @@ class ChangeWatcher(QObject):
         self.cfg = cfg
         self.paused = False
         self._timer = QTimer(self)
-        self._timer.setInterval(int(cfg.get("behavior.poll_interval_ms", 1200)))
+        self._timer.setInterval(int(cfg.get("behavior.poll_interval_ms", 800)))
         self._timer.timeout.connect(self._tick)
-        self._last = ""
-        self._pending = ""
+        self._last: np.ndarray | None = None
+        self._pending: np.ndarray | None = None
         self._stable = 0
+        self._busy = False
+        self._sig = _HashSignals()
+        self._sig.hashed.connect(self._on_hashed)
+
+    def _tolerance(self) -> float:
+        return float(self.cfg.get("behavior.change_tolerance", 0.02))
 
     def set_region(self, rect: tuple[int, int, int, int]) -> None:
-        self._last = ""
-        self._pending = ""
+        self._last = None
+        self._pending = None
         self._stable = 0
 
     def start(self) -> None:
@@ -61,20 +90,29 @@ class ChangeWatcher(QObject):
         self._timer.stop()
 
     def _tick(self) -> None:
-        if self.paused:
+        if self.paused or self._busy:
             return
-        h = screen.region_hash(screen.effective_rect(self.cfg.region))
-        if not h:
+        self._busy = True
+        QThreadPool.globalInstance().start(
+            _HashJob(self._sig, screen.effective_rect(self.cfg.region))
+        )
+
+    def _same(self, a: np.ndarray | None, b: np.ndarray | None) -> bool:
+        return screen.sig_diff(a, b) <= self._tolerance()
+
+    def _on_hashed(self, sig) -> None:
+        self._busy = False
+        if sig is None:
             return
-        if h != self._pending:
-            self._pending = h
+        if not self._same(sig, self._pending):
+            self._pending = sig
             self._stable = 0
             return
         self._stable += 1
         if self._stable < int(self.cfg.get("behavior.settle_polls", 2)):
             return
-        if h != self._last:
-            self._last = h
+        if not self._same(sig, self._last):
+            self._last = sig
             self.changed.emit()
 
 
@@ -106,16 +144,15 @@ class Pipeline(QObject):
             return
         target = rect or self.cfg.region
         self._worker = SolveWorker(self.cfg, self.cache, screen.effective_rect(target))
+        # 线程结束后自我销毁；不在 UI 线程上 wait() 卡等待
+        self._worker.finished.connect(self._worker.deleteLater)
         self._worker.status.connect(self.status)
         self._worker.done.connect(self._on_done)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
     def _finish(self) -> None:
-        if self._worker is not None:
-            self._worker.wait(2000)
-            self._worker.deleteLater()
-            self._worker = None
+        self._worker = None
         if self._queued:
             self._queued = False
             QTimer.singleShot(150, self.run)

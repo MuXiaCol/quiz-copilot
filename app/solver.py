@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import base64
-import hashlib
+import io
 import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import numpy as np
+from PIL import Image
 
 from . import imageutil
 from .cache import AnswerCache
@@ -182,15 +183,29 @@ def _build_answers(payload: dict) -> list[Answer]:
 # --------------------------------------------------------------------------
 # 调用
 # --------------------------------------------------------------------------
+_client_cache: dict = {}
+
+
 def _client(cfg):
+    """按 (key, base_url, timeout) 复用客户端。
+
+    OpenAI 客户端每次新建都会重开 httpx 连接池，等于每个请求重新
+    TCP+TLS 握手；复用后同会话的第二次请求（含低置信复核）省掉握手。"""
     from openai import OpenAI
 
-    return OpenAI(
-        api_key=cfg.get("api.api_key") or "sk-none",
-        base_url=cfg.get("api.base_url"),
-        timeout=float(cfg.get("api.timeout", 90)),
-        max_retries=1,
+    ck = (
+        str(cfg.get("api.api_key") or "sk-none"),
+        str(cfg.get("api.base_url")),
+        float(cfg.get("api.timeout", 90)),
     )
+    if ck not in _client_cache:
+        _client_cache[ck] = OpenAI(
+            api_key=ck[0],
+            base_url=ck[1],
+            timeout=ck[2],
+            max_retries=1,
+        )
+    return _client_cache[ck]
 
 
 THINKING_LEVELS = ("off", "low", "high", "max")
@@ -248,33 +263,72 @@ def _chat(cfg, messages, want_json: bool = True) -> str:
     return (resp.choices[0].message.content or "").strip()
 
 
-def _refine_low_confidence(cfg, messages, answers: list[Answer]) -> list[Answer]:
-    """低置信度的题再问一次（独立采样），取更有把握的那版。"""
+def _retry_image_blocks(strips: list[bytes], cfg) -> list[dict]:
+    """复核轮的图片块。默认把 PNG 条带重压成 JPEG 再传：复核只需要再读一遍
+    文字，q92 足够，上传体积约为 PNG 的 1/3；可在配置里改回 png。"""
+    fmt = str(cfg.get("capture.retry_format", "jpeg")).strip().lower()
+    out: list[dict] = []
+    for b in strips:
+        if fmt == "png":
+            mime, data = "image/png", b
+        else:
+            im = Image.open(io.BytesIO(b)).convert("RGB")
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=92)
+            mime, data = "image/jpeg", buf.getvalue()
+        out.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": "data:" + mime + ";base64," + base64.b64encode(data).decode("ascii"),
+                    "detail": "high",
+                },
+            }
+        )
+    return out
+
+
+def _refine_low_confidence(
+    cfg, strips: list[bytes], answers: list[Answer], status: StatusFn | None = None
+) -> list[Answer]:
+    """低置信度的题再问一次（独立采样），逐题取更有把握的那版。
+
+    复核请求只列低置信题、只要求输出这些题，并且图片用轻量格式重传，
+    相比"原样重发整个会话"省下大半上传和生成开销。
+    """
     threshold = float(cfg.get("behavior.low_confidence", 0.70))
-    if not any(a.confidence < threshold for a in answers):
+    low = [a for a in answers if a.confidence < threshold]
+    if not low:
         return answers
-    retry_messages = messages + [
-        {"role": "assistant", "content": json.dumps(
-            {"answers": [{"no": a.no, "answer": a.letters} for a in answers]},
-            ensure_ascii=False)},
-        {"role": "user", "content": (
-            f"上面这些答案里有把握不足的（confidence < {threshold}）。"
-            "请重新审视每一道题，给出你认为最正确的答案，同样只输出 JSON。"
-        )},
+    if status:
+        status(f"复核低置信度题目…（{len(low)}/{len(answers)} 题）")
+    listing = "\n".join(
+        f"第{a.no}题（{a.qtype}）「{a.stem}」当前答案 {''.join(a.letters)}（confidence {a.confidence:.2f}）"
+        for a in low
+    )
+    content: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                "下面是同一页面截图切成的若干上下连续图片。\n"
+                f"第一轮作答中，这些题把握不足（confidence < {threshold}）：\n{listing}\n"
+                "请重读这些题的题干和全部选项后重新作答；维持原答案也可以，"
+                "不要为了改而改。仍然只输出一个 JSON 对象，answers 数组只包含"
+                "上面列出的题号，格式与第一轮相同。"
+            ),
+        }
     ]
+    content += _retry_image_blocks(strips, cfg)
+
     try:
-        again = _build_answers(extract_json(_chat(cfg, retry_messages)) or {})
+        again = _build_answers(extract_json(_chat(cfg, [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ])) or {})
     except Exception:
         return answers
     best = {a.no: a for a in again}
     return [max((a, best[a.no]), key=lambda x: x.confidence) if a.no in best else a for a in answers]
-
-
-def image_key(strips: list[bytes]) -> str:
-    h = hashlib.sha256()
-    for b in strips:
-        h.update(b)
-    return h.hexdigest()
 
 
 def solve(
@@ -285,11 +339,8 @@ def solve(
     hint: str = "",
 ) -> list[Answer]:
     """核心入口：BGR 截图 → 答案列表。"""
-    if status:
-        status("切图中…")
-    strips = imageutil.strip_images(bgr, target_h=int(cfg.get("capture.strip_h", 1000)))
-    key = image_key(strips)
-
+    # 先用原始像素哈希查缓存，命中就完全跳过切带 + PNG 编码（整屏秒级开销）
+    key = imageutil.content_hash(bgr)
     if cache is not None and cfg.get("behavior.use_cache", True):
         hit = cache.get(key)
         if hit:
@@ -299,6 +350,10 @@ def solve(
             if status:
                 status(f"缓存命中 · {len(answers)} 题")
             return answers
+
+    if status:
+        status("切图中…")
+    strips = imageutil.strip_images(bgr, target_h=int(cfg.get("capture.strip_h", 1000)))
 
     content: list[dict] = [
         {
@@ -335,9 +390,7 @@ def solve(
         raise RuntimeError("模型没有识别到题目，试试重新框选（F7）")
 
     if cfg.get("behavior.vote_low_confidence", True):
-        if status:
-            status("复核低置信度题目…")
-        answers = _refine_low_confidence(cfg, messages, answers)
+        answers = _refine_low_confidence(cfg, strips, answers, status)
 
     if cache is not None:
         cache.put(key, payload)

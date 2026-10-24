@@ -9,6 +9,8 @@ from typing import Any
 
 APP_NAME = "QuizCopilot"
 
+CONFIG_VERSION = 2
+
 
 def app_dir() -> Path:
     base = os.environ.get("APPDATA") or str(Path.home())
@@ -41,6 +43,8 @@ DEFAULTS: dict[str, Any] = {
         "region": [0, 0, 0, 0],
         # 长截图按这个高度切成横带再发给模型，切点尽量落在空白行上
         "strip_h": 1000,
+        # 低置信复核轮的图片格式：jpeg（体积约 1/3，复核够用）/ png（与首轮相同）
+        "retry_format": "jpeg",
     },
     "ui": {
         "width": 430,
@@ -53,8 +57,12 @@ DEFAULTS: dict[str, Any] = {
     },
     "behavior": {
         "auto_mode": False,
-        "poll_interval_ms": 1200,
+        # 变化检测已挪出 UI 线程且带容差，800ms 不会卡 UI；自动模式翻页后
+        # 约 2 个周期（~1.6s）触发识别。想更省电可调大。
+        "poll_interval_ms": 800,
         "settle_polls": 2,
+        # 两帧量化网格的差异比例 ≤ 该值视为"画面没变"（光标闪烁约 0.01%）
+        "change_tolerance": 0.02,
         "use_cache": True,
         "vote_low_confidence": True,
         "low_confidence": 0.70,
@@ -66,6 +74,8 @@ DEFAULTS: dict[str, Any] = {
         "pick": "F7",        # 重新框选识别区域
         "settings": "F8",    # 打开设置
     },
+
+    "config_version": CONFIG_VERSION,
 }
 
 
@@ -93,8 +103,28 @@ class Config:
                 disk = json.loads(self.path.read_text(encoding="utf-8"))
                 if isinstance(disk, dict):
                     _deep_merge(self.data, disk)
+                    self._migrate(disk)
         except Exception:
             # 配置损坏不应阻塞启动，直接用默认值
+            pass
+
+    def _migrate(self, disk: dict) -> None:
+        """把老版本的配置文件迁到当前版本。只在 load 到旧文件时执行一次。"""
+        try:
+            v = int(disk.get("config_version", 1) or 1)
+        except Exception:
+            v = 1
+        if v >= CONFIG_VERSION:
+            return
+        if v < 2:
+            # v2：变化检测移出 UI 线程并改为容差比较，老默认 1200ms 可以安全提速。
+            # 用户显式改过的不动（无法区分时保守起见只迁移恰好等于旧默认的值）。
+            if self.get("behavior.poll_interval_ms") == 1200:
+                self.set("behavior.poll_interval_ms", 800)
+        self.set("config_version", CONFIG_VERSION)
+        try:
+            self.save()
+        except Exception:
             pass
 
     def save(self) -> None:

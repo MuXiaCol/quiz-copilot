@@ -164,7 +164,8 @@ pwsh -File .\build.ps1     # 产出 dist\QuizCopilot.exe
   },
   "capture": {
     "region": [0, 0, 0, 0],           // 物理像素 [left, top, width, height]，全 0 = 整屏
-    "strip_h": 1000                   // 长图切带的目标高度
+    "strip_h": 1000,                  // 长图切带的目标高度
+    "retry_format": "jpeg"            // 低置信复核轮的图片格式：jpeg / png
   },
   "ui": {
     "width": 430,
@@ -176,7 +177,9 @@ pwsh -File .\build.ps1     # 产出 dist\QuizCopilot.exe
   },
   "behavior": {
     "auto_mode": false,
-    "poll_interval_ms": 1200,
+    "poll_interval_ms": 800,          // 自动模式轮询间隔
+    "settle_polls": 2,                // 连续几个周期画面不变才算"稳定"
+    "change_tolerance": 0.02,         // 差异比例容差（光标闪烁不会误判为变化）
     "use_cache": true,
     "vote_low_confidence": true,
     "low_confidence": 0.70

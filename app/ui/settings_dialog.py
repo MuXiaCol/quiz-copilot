@@ -147,7 +147,7 @@ class SettingsDialog(QDialog):
         self.poll_spin = QSpinBox()
         self.poll_spin.setRange(400, 5000)
         self.poll_spin.setSingleStep(100)
-        self.poll_spin.setValue(int(cfg.get("behavior.poll_interval_ms", 1200)))
+        self.poll_spin.setValue(int(cfg.get("behavior.poll_interval_ms", 800)))
         poll_row.addWidget(self.poll_spin)
         poll_row.addStretch(1)
         beh_lay.addLayout(poll_row)

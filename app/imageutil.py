@@ -1,6 +1,7 @@
 """图像工具：编码、按空白行智能切带（让视觉模型看清小字）。"""
 from __future__ import annotations
 
+import hashlib
 import io
 
 import numpy as np
@@ -16,9 +17,30 @@ def png_bytes(bgr: np.ndarray) -> bytes:
 
 
 def _ink_rows(bgr: np.ndarray, dark: int = 200) -> np.ndarray:
-    """返回每一行的"墨量"（深色像素占比）。"""
-    gray = bgr.astype(np.uint16).mean(axis=2)
+    """返回每一行的"墨量"（深色像素占比）。
+
+    用整数加权 (B + 2G + R)/4 近似亮度：uint16 累加比 astype 后的
+    float64 mean 快约 3 倍，灰度像素下结果与真亮度一致。"""
+    q = bgr.astype(np.uint16)
+    gray = (q[..., 0] + 2 * q[..., 1] + q[..., 2]) >> 2
     return (gray < dark).sum(axis=1) / max(1, bgr.shape[1])
+
+
+def content_hash(bgr: np.ndarray, cols: int = 320, quant: int = 16) -> str:
+    """原始像素的降采样量化哈希，用作答案缓存 key。
+
+    之前拿"PNG 编码后的字节"当 key，缓存命中前也得先付整轮 PNG 编码
+    （整屏秒级）；直接对抽样像素哈希不到 1ms。抽样 + 量化也让 1px 光标
+    闪烁这类噪声大概率不改变 key。"""
+    h, w = bgr.shape[:2]
+    if h <= 0 or w <= 0:
+        return ""
+    k = max(1, w // cols)
+    small = bgr[::k, ::k, :3]
+    if small.size == 0:
+        return ""
+    q = small // quant
+    return hashlib.sha256(q.tobytes()).hexdigest()
 
 
 def smart_strips(
